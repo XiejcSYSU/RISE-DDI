@@ -196,7 +196,7 @@ class GraphTransformer(torch.nn.Module):
         self.spatial_encoder = SpatialEncoding(embedding_dim)  ##这两个是权重共享的
 
         self.encoder = torch.nn.ModuleList()
-        for i in range(layer_num - 1):
+        for i in range(layer_num):
             self.encoder.append(GraphTransformerEncode(num_heads = num_heads, in_dim = embedding_dim, dim_forward = embedding_dim*2,
                                                        rel_encoder = self.rel_encoder, spatial_encoder = self.spatial_encoder, dropout=dropout))
 

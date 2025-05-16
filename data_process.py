@@ -14,6 +14,8 @@ from torch_geometric.utils import subgraph, degree, get_laplacian
 from utils import *
 from torch import Tensor
 import numpy as np
+import pickle
+from tqdm import tqdm
 
 
 e_map = {
@@ -239,9 +241,72 @@ def read_network(path):
         f.close()
     num_node = np.max((np.array(edge_index)))
     num_rel = max(rel_index) + 1
-    print(len(list(set(rel_index))))
+
+    edge_index = np.array(edge_index, dtype=int).T
+    rel_index = np.array(rel_index, dtype=int)
+
+    reverse_edge_index = np.flip(edge_index, axis=0)
+    edge_index = np.concatenate([edge_index, reverse_edge_index], axis=1).T
+    rel_index = np.concatenate([rel_index, rel_index], axis=0)
+
+    edge_index = edge_index.tolist()
+    rel_index = rel_index.tolist()
 
     return num_node, edge_index, rel_index, num_rel
+
+def process_node_graph(data, node_graph, edge_index, edge_rel, args):
+
+    # paths = "data/" + str(args.dataset) + "/" + str(args.extractor) + "/"
+    paths = "data/" + str(args.dataset) + "/" + 'khop-subtree' + "/"
+    json_path = paths + "hop_" + str(args.khop) + "_fixed_"  + str(args.fixed_num) + ".pkl"
+    if os.path.exists(json_path):
+        with open(json_path, 'rb') as f:
+            subgraphs = pickle.load(f)
+
+        return subgraphs
+    
+    subgraphs = {}
+    
+    for d in tqdm(data):
+        drug1_id = d[0]
+        drug2_id = d[1]
+
+        subset1, subgraph_edge_index1, subgraph_rel1, mapping_id1, s_edge_index1, s_value1, s_rel1, deg1 = node_graph[str(drug1_id)]
+        subset2, subgraph_edge_index2, subgraph_rel2, mapping_id2, s_edge_index2, s_value2, s_rel2, deg2 = node_graph[str(drug2_id)]
+
+
+        subset1 = torch.LongTensor(subset1)
+        subset2 = torch.LongTensor(subset2)
+
+        x = torch.cat([subset1, subset2], dim=0)
+        x = torch.unique(x, dim=0)
+
+        mask = (x != drug1_id) & (x != drug2_id)
+        x = x[mask]
+        x = torch.cat([torch.tensor(d), x])
+
+        mapping_id = torch.zeros(len(x), dtype=torch.long)
+        mapping_id[torch.where(x == drug1_id)[0]] = 1
+        mapping_id[torch.where(x == drug2_id)[0]] = 1
+
+        edge_index2, edge_rel2 = subgraph(x, edge_index, edge_rel, relabel_nodes=True)
+        G = DATA.Data(x=x,
+                    edge_index=edge_index2,
+                    id=mapping_id,
+                    rel_index=edge_rel2,
+                    sp_edge_index=edge_index2,
+                    sp_value=torch.ones(edge_index2.size(1), dtype=torch.float),
+                    sp_edge_rel=edge_rel2
+                )
+        subgraphs[(drug1_id, drug2_id)] = G
+        subgraphs[(drug2_id, drug1_id)] = G
+
+    with open(json_path, 'wb') as f:
+        pickle.dump(subgraphs, f)
+
+    return subgraphs
+
+
 
 def read_smiles(path):
     print("Read " + path + "!")
@@ -263,12 +328,15 @@ def read_smiles(path):
 def generate_node_subgraphs(dataset, drug_id, network_edge_index, network_rel_index, num_rel, args):
 
     method = args.extractor
+    # if method == 'RL':
+    #     method = 'randomWalk'
     edge_index = torch.from_numpy(np.array(network_edge_index).T) ##[2, num_edges]
     rel_index = torch.from_numpy(np.array(network_rel_index))
 
-    row, col = edge_index
-    reverse_edge_index = torch.stack((col, row),0)
-    undirected_edge_index = torch.cat((edge_index, reverse_edge_index),1)
+    undirected_edge_index = edge_index
+    # row, col = edge_index
+    # reverse_edge_index = torch.stack((col, row),0)
+    # undirected_edge_index = torch.cat((edge_index, reverse_edge_index),1)
 
     paths = "data/" + str(dataset) + "/" + str(method) + "/"
 
@@ -285,6 +353,9 @@ def generate_node_subgraphs(dataset, drug_id, network_edge_index, network_rel_in
     elif method == "randomWalk":
         subgraphs, max_degree, max_rel_num = rwExtractor(drug_id, undirected_edge_index, rel_index, paths, num_rel,
                                                          sub_num=args.graph_fixed_num, length=args.fixed_num)
+    elif method == "RL":
+        subgraphs, max_degree, max_rel_num = subtreeExtractor(drug_id, undirected_edge_index, rel_index, paths, num_rel,
+                                                              fixed_num=args.fixed_num, khop=args.khop)
 
     return subgraphs, max_degree, max_rel_num
 
@@ -306,7 +377,8 @@ def subtreeExtractor(drug_id, edge_index, rel_index, shortest_paths, num_rel, fi
 
         return subgraphs, max_degree, max_rel;
 
-    undirected_rel_index = torch.cat((rel_index, rel_index), 0)
+    # undirected_rel_index = torch.cat((rel_index, rel_index), 0)
+    undirected_rel_index = rel_index
 
     for d in drug_id:
         subset, sub_edge_index, sub_rel_index, mapping_list = k_hop_subgraph(int(d), khop, edge_index, undirected_rel_index, fixed_num, relabel_nodes=True)  ##subset是所有集合的节点，mapping指示的是center node是哪个
@@ -330,10 +402,10 @@ def subtreeExtractor(drug_id, edge_index, rel_index, shortest_paths, num_rel, fi
         for i in range(len(sp_edge_index)):
             if sp_value[i] == 1:  ##也是保证多关系的边全部在数据里
                 continue
-            else:
-                s_edge_index.append(sp_edge_index[i].tolist())
-                s_value.append(sp_value[i])
-                s_rel.append(sp_value[i] + num_rel)
+            # else:
+            #     s_edge_index.append(sp_edge_index[i].tolist())
+            #     s_value.append(sp_value[i])
+            #     s_rel.append(sp_value[i] + num_rel)
 
         assert len(s_edge_index) == len(s_value)
         assert len(s_edge_index) == len(s_rel)
@@ -484,10 +556,10 @@ def rwExtractor(drug_id, edge_index, rel_index, shortest_paths, num_rel, sub_num
         for i in range(len(sp_edge_index)):
             if sp_value[i] == 1:  ##也是保证多关系的边全部在数据里
                 continue
-            else:
-                s_edge_index.append(sp_edge_index[i].tolist())
-                s_value.append(sp_value[i])
-                s_rel.append(sp_value[i] + num_rel)
+            # else:
+            #     s_edge_index.append(sp_edge_index[i].tolist())
+            #     s_value.append(sp_value[i])
+            #     s_rel.append(sp_value[i] + num_rel)
 
         assert len(s_edge_index) == len(s_value)
         assert len(s_edge_index) == len(s_rel)

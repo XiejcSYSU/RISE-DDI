@@ -59,3 +59,7 @@ python main.py -dataset drugbank/kegg/ogbl-biokg -extractor khop-subtree/randomW
 
 The hyper-parameters used to train TIGER on above three datasets are shown in our paper.
 
+CUDA_VISIBLE_DEVICES=3 python -u main.py --dataset drugbank --extractor RL --epoch 100 --sampler_lr 0.001 --layer 1 --pos 2.5 --neg 1 --mode s2  2>&1 | tee ./best_save/1-3-t2.out
+
+CUDA_VISIBLE_DEVICES=4 python -u main.py --dataset drugbank --extractor khop-subtree --khop 1 --layer 1 --mode s3
+

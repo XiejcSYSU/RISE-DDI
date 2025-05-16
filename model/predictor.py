@@ -9,37 +9,14 @@ import math
 from torch.nn import Linear, Sequential, ReLU, BatchNorm1d as BN
 from torch_geometric.utils import degree
 from .GraphTransformer import GraphTransformer
+from .common import NodeFeatures
 import os
 
 
 
-class NodeFeatures(torch.nn.Module):
-    def __init__(self, degree, feature_num, embedding_dim, layer=2, type='graph'):
-        super(NodeFeatures, self).__init__()
-
-        if type == 'graph': ##代表有feature num
-            self.node_encoder = Linear(feature_num, embedding_dim)
-        else:
-            self.node_encoder = torch.nn.Embedding(feature_num, embedding_dim)
-
-        self.degree_encoder = torch.nn.Embedding(degree, embedding_dim, padding_idx=0)  ##将度的值映射成embedding
-        self.apply(lambda module: init_params(module, layers=layer))
-
-    def reset_parameters(self):
-        self.node_encoder.reset_parameters()
-        self.degree_encoder.reset_parameters()
-
-    def forward(self, data):
-
-        row, col = data.edge_index
-        x_degree = degree(col, data.x.size(0), dtype=data.x.dtype)
-        node_feature = self.node_encoder(data.x)
-        node_feature += self.degree_encoder(x_degree.long())
-
-        return node_feature
 
 class Predictor(torch.nn.Module):
-    def __init__(self, max_layer = 6, num_features_drug = 78, num_nodes = 200, num_relations_mol = 10, num_relations_graph = 10, output_dim=64, max_degree_graph=100, max_degree_node=100, sub_coeff = 0.2, mi_coeff = 0.5, dropout=0.2, device = 'cuda'):
+    def __init__(self, max_layer = 6, num_features_drug = 78, num_nodes = 200, num_relations_mol = 10, num_relations_graph = 10, output_dim=64, max_degree_graph=100, max_degree_node=100, sub_coeff = 0.2, mi_coeff = 0.5, dropout=0.2, device = 'cuda', args=None):
         super(Predictor, self).__init__()
 
         self.device = device
@@ -83,6 +60,9 @@ class Predictor(torch.nn.Module):
         self.disc = Discriminator(output_dim)
         self.b_xent = BCEWithLogitsLoss()
 
+        self.pos = args.pos
+        self.neg = args.neg
+
     def to(self, device):
 
         self.mol_atom_feature.to(device)
@@ -120,7 +100,7 @@ class Predictor(torch.nn.Module):
 
 
         drug1_embedding = self.fc1(torch.concat([drug1_node_embedding, mol1_graph_embedding],dim=-1))
-        drug2_embedding = self.fc1(torch.concat([drug2_node_embedding, mol2_graph_embedding], dim=-1))
+        drug2_embedding = self.fc1(torch.concat([drug2_node_embedding, mol2_graph_embedding],dim=-1))
 
         score = self.fc2(torch.concat([drug1_embedding, drug2_embedding], dim=-1))
 
@@ -135,6 +115,71 @@ class Predictor(torch.nn.Module):
         loss = loss_label + self.mol_coeff* loss_s_m
 
         return torch.exp(predicts_drug)[:,1], loss
+
+    def pred(self, drug1_mol, drug2_mol, subgraph_lists, batch):
+
+        mol1_atom_feature = self.mol_atom_feature(drug1_mol)
+        mol2_atom_feature = self.mol_atom_feature(drug2_mol)
+
+        mol1_graph_embedding, mol1_atom_embedding, mol1_attn = self.mol_representation_learning(mol1_atom_feature, drug1_mol)
+        mol2_graph_embedding, mol2_atom_embedding, mol2_attn = self.mol_representation_learning(mol2_atom_feature, drug2_mol)
+
+        # mol1_graph_embedding batch_size * dim
+
+        drug_node_feature = self.drug_node_feature(subgraph_lists)
+        drug1_node_embedding, drug2_node_embedding = self.node_representation_learning(drug_node_feature, subgraph_lists)
+        # print('drug node feature:', drug_node_feature)
+        # print('drug1_node_embedding:', drug1_node_embedding)
+        # print('drug2_node_embedding:', drug2_node_embedding)
+
+        drug1_embedding = self.fc1(torch.concat([drug1_node_embedding, mol1_graph_embedding[batch]],dim=-1))
+        drug2_embedding = self.fc1(torch.concat([drug2_node_embedding, mol2_graph_embedding[batch]],dim=-1))
+
+        score = self.fc2(torch.concat([drug1_embedding, drug2_embedding], dim=-1))
+        # print('score:', score)
+        predicts_drug = F.log_softmax(score, dim=-1)
+        predicts_drug = torch.exp(predicts_drug)[:,1]
+        # print('pred', predicts_drug)
+
+        return predicts_drug
+    
+    def get_reward(self, drug1_mol, drug2_mol, subgraph_lists, batch, pred_default=None):
+
+
+        predicts_drug = self.pred(drug1_mol, drug2_mol, subgraph_lists, batch)
+        y = drug1_mol.y.view(-1)[batch]
+        
+
+        """How to design reward function?"""
+        # v1
+        # condition1 = (y == 1) & (predicts_drug > 0.5)
+        # condition2 = (y == 0) & (predicts_drug <= 0.5)
+        # reward = torch.where(condition1 | condition2, 2, -2)
+
+        # v2
+        # pred_default = pred_default[batch]
+        # reward_1 = 5*(predicts_drug - pred_default)
+        # reward_0 = 5*(pred_default - predicts_drug)
+        # reward = torch.where(y == 1, reward_1, reward_0)
+
+        # v3
+        reward = torch.zeros_like(predicts_drug)
+        pred_default = pred_default[batch]
+
+        cond1 = (y == 1) & (predicts_drug > pred_default)
+        reward[cond1] = self.pos * (predicts_drug[cond1] - pred_default[cond1])
+
+        cond2 = (y == 1) & (predicts_drug <= pred_default)
+        reward[cond2] = self.neg * (predicts_drug[cond2] - pred_default[cond2])
+
+        cond3 = (y == 0) & (predicts_drug < pred_default)
+        reward[cond3] = self.pos * (pred_default[cond3] - predicts_drug[cond3])
+
+        cond4 = (y == 0) & (predicts_drug >= pred_default)
+        reward[cond4] = self.neg * (pred_default[cond4] - predicts_drug[cond4])
+
+        return reward, predicts_drug
+
 
     def MI(self, graph_embeddings, sub_embeddings):
         idx = torch.arange(graph_embeddings.shape[0] - 1, -1, -1)

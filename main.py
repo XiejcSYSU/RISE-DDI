@@ -1,10 +1,3 @@
-# -*- coding: utf-8 -*-
-# @Time    : 2023/5/28 下午6:28
-# @Author  : xiaorui su
-# @Email   :  suxiaorui19@mails.ucas.edu.cn
-# @File    : main.py.py
-# @Software : PyCharm
-
 import os
 import argparse
 import gc
@@ -20,11 +13,19 @@ from model.predictor import Predictor
 from model.sampler import Sampler
 from torch_geometric.utils import degree
 from torch.utils.data.distributed import DistributedSampler
-from data_process import smile_to_graph, read_smiles, read_interactions, generate_node_subgraphs, read_network
+from data_process import smile_to_graph, read_smiles, read_interactions, generate_node_subgraphs, read_network, process_node_graph
 from sklearn.model_selection import StratifiedKFold, KFold
 from train_eval import train, test, eval
-
 import random
+
+import pdb
+import sys
+
+# def custom_except_hook(exc_type, exc_value, exc_traceback):
+#     print(f"\nException caught: {exc_value}")
+#     pdb.post_mortem(exc_traceback)
+
+# sys.excepthook = custom_except_hook
 
 def init_args(user_args=None):
 
@@ -38,14 +39,23 @@ def init_args(user_args=None):
     parser.add_argument('--layer', type=int, default=2)
 
     parser.add_argument('--predictor_lr', type=float, default=0.001)
+    parser.add_argument('--sampler_lr', type=float, default=0.1)
     parser.add_argument('--weight_decay', type=float, default=0.0001)
     parser.add_argument('--batch_size', type=int, default=128)
 
-    parser.add_argument('--model_episodes', type=int, default=50)
+    parser.add_argument('--pos', type=float, default=3)
+    parser.add_argument('--neg', type=float, default=1)
+
+
+    parser.add_argument('--epoch', type=int, default=50)
     parser.add_argument('--extractor', type=str, default="randomWalk") ##option [khop-subtree, randomWalk, probability]
     parser.add_argument('--graph_fixed_num', type=int, default=1)
-    parser.add_argument('--khop', type=int, default=2)
+    parser.add_argument('--khop', type=int, default=1)
     parser.add_argument('--fixed_num', type=int, default=32)
+
+    parser.add_argument('--mode', type=str, default="s1") 
+    parser.add_argument('--load_predictor', type=str, default="./best_save/tiger/drugbank/khop-subtree/s3/fold_0/0.85018/DDI_predictor.pt")
+    parser.add_argument('--load_sampler', type=str, default="")
 
     # Graphormer
     parser.add_argument("--d_dim", type=int, default=64)
@@ -53,6 +63,9 @@ def init_args(user_args=None):
     parser.add_argument("--max_smiles_degree", type=int, default=300)
     parser.add_argument("--max_graph_degree", type=int, default=600)
     parser.add_argument("--dropout", type=float, default=0.2)
+    parser.add_argument("--k_step", type=int, default=10)
+
+    
 
 
     # coeff
@@ -67,10 +80,20 @@ def init_args(user_args=None):
 
 
 def setup_seed(seed):
-    torch.manual_seed(seed)
-    torch.cuda.manual_seed_all(seed)
-    np.random.seed(seed)
+    # torch.manual_seed(seed)
+    # torch.cuda.manual_seed_all(seed)
+    # np.random.seed(seed)
+    # random.seed(seed)
+
     random.seed(seed)
+    os.environ['PYTHONHASHSEED'] =str(seed)
+    np.random.seed(seed)
+    np.random.RandomState(seed)
+    torch.manual_seed(seed)
+    torch.cuda.manual_seed(seed)
+    torch.cuda.manual_seed_all(seed)
+    torch.use_deterministic_algorithms(True)
+    os.environ['CUBLAS_WORKSPACE_CONFIG']=':4096:8'
 
 
 def k_fold(data, kf, folds, y):
@@ -136,7 +159,7 @@ def load_data(args):
     data_sta = {
         'num_nodes': num_node + 1,
         'num_rel_mol': num_rel_mol_update + 1,
-        'num_rel_graph': num_rel_update + 1,
+        'num_rel_graph': num_rel,
         'num_interactions': len(interactions),
         'num_drugs_DDI': len(all_contained_drgus),
         'max_degree_graph': max_smiles_degree + 1,
@@ -145,7 +168,7 @@ def load_data(args):
 
     print(data_sta)
 
-    return interactions, labels, smile_graph, drug_subgraphs, data_sta, network_edge_index
+    return interactions, labels, smile_graph, drug_subgraphs, data_sta, network_edge_index, network_rel_index
 
 def save(save_dir, args, train_log, test_log):
     args.device = 0
@@ -203,13 +226,13 @@ def init_model(args, dataset_statistics):
                     sub_coeff=args.sub_coeff,
                     mi_coeff=args.mi_coeff,
                     dropout=args.dropout,
-                    device=torch.device('cuda' if torch.cuda.is_available() else 'cpu'))
+                    device=torch.device('cuda' if torch.cuda.is_available() else 'cpu'),
+                    args=args)
     
-    DDI_sampler = None
+    DDI_sampler = Sampler(args, dataset_statistics['num_nodes'])
 
     predictor_optim = torch.optim.Adam(DDI_predictor.parameters(), args.predictor_lr, weight_decay=args.weight_decay)
-    # sampler_optim = torch.optim.Adam(DDI_sampler.parameters(), args.sampler_lr, weight_decay=args.weight_decay)
-    sampler_optim = None
+    sampler_optim = torch.optim.Adam(DDI_sampler.parameters(), args.sampler_lr, weight_decay=args.weight_decay)
 
     return DDI_predictor, DDI_sampler, predictor_optim, sampler_optim
 
@@ -221,7 +244,17 @@ def main(args = None, k_fold = 5):
     results_of_each_fold = []
 
     ##加载interactions的data
-    data, labels, smile_graph, node_graph, dataset_statistics, adj_matrix = load_data(args)
+
+    data, labels, smile_graph, node_graph, dataset_statistics, adj_matrix, edge_rel = load_data(args)
+
+    # selected_indices = np.random.choice(data.shape[0], size=data.shape[0]//2, replace=False)
+    # data = data[selected_indices]
+    # labels = labels[selected_indices]
+
+    edge_index = torch.tensor(adj_matrix).T
+    edge_rel = torch.tensor(edge_rel)
+    node_graph = process_node_graph(data, node_graph, edge_index, edge_rel, args)
+
 
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
 
@@ -230,10 +263,15 @@ def main(args = None, k_fold = 5):
     for fold, (train_idx, test_idx, val_idx) in enumerate(zip(*split_fold(k_fold, data, labels, args.s_type))):
         print(f"============================{fold+1}/{k_fold}==================================")
         print("loading data!!")
+
+
         ##load_data
         train_data = DTADataset(x=data[train_idx], y=labels[train_idx], sub_graph=node_graph, smile_graph=smile_graph)
         test_data = DTADataset(x=data[test_idx], y=labels[test_idx], sub_graph=node_graph, smile_graph=smile_graph)
         eval_data = DTADataset(x=data[val_idx], y=labels[val_idx], sub_graph=node_graph, smile_graph=smile_graph)
+
+        edge_index = edge_index.cuda()
+        edge_rel = edge_rel.cuda()
 
         train_loader = torch.utils.data.DataLoader(train_data, batch_size=args.batch_size, shuffle=True, collate_fn=collate) 
         test_loader = torch.utils.data.DataLoader(test_data, batch_size=args.batch_size, shuffle=False, collate_fn=collate) 
@@ -241,34 +279,54 @@ def main(args = None, k_fold = 5):
 
         DDI_predictor, DDI_sampler, predictor_optim, sampler_optim = init_model(args, dataset_statistics)
         DDI_predictor.to(device)
+        DDI_sampler.to(device)
         DDI_predictor.reset_parameters()
-        # DDI_sampler.to(device)
-        # DDI_sampler.reset_parameters()
+
+        """Load pretrained model"""
+        if args.mode == 's1': 
+            """Train predictor using trained sampler"""
+            # DDI_sampler.load_state_dict(torch.load('/home/xiejc/Code/TIGER/RL/best_save/tiger/drugbank/RL/fold_0/0.00000/DDI_sampler.pt'))
+            DDI_sampler.load_state_dict(torch.load(args.load_sampler))
+        elif args.mode == 's2': 
+            """Train sampler using trained predictor"""
+            # DDI_predictor.load_state_dict(torch.load('/home/xiejc/Code/TIGER/RL/best_save/tiger/drugbank/randomWalk/fold_0/0.86878/DDI_predictor.pt')) # 1-hop-RW
+            # DDI_predictor.load_state_dict(torch.load('/home/xiejc/Code/TIGER/RL/best_save/tiger/drugbank/khop-subtree/fold_0/0.87003/DDI_predictor.pt')) # 1-hop-k
+            DDI_predictor.load_state_dict(torch.load(args.load_predictor))
+        elif args.mode == 's3':
+            """Train predictor without sampler"""
+            pass
+        elif args.mode == 's4':
+            """Train both predictor and sampler"""
+            pass
+        
 
         ##train_model
-        #trange = tqdm(range(1, args.model_episodes + 1))
+        #trange = tqdm(range(1, args.epoch + 1))
         best_auc = 0.0
         early_stop_num = 0
         train_reward = 0
 
         train_log = {'train_acc':[], 'train_auc':[], 'train_aupr':[], 'train_loss':[], 'train_reward':[],
-                        'eval_acc':[], 'eval_auc':[], 'eval_aupr':[], 'eval_loss':[]}
+                        'eval_acc':[], 'eval_auc':[], 'eval_aupr':[], 'eval_loss':[], 'eval_rewrad':[]}
         
-        for i_episode in range(args.model_episodes):
+        for i_episode in range(args.epoch):
             loop = tqdm(train_loader, ncols=80)
-            loop.set_description(f'Epoch[{i_episode}/{args.model_episodes}]')
+            loop.set_description(f'Epoch[{i_episode}/{args.epoch}]')
             train_acc, train_f1, train_auc, train_aupr, train_loss, train_reward = train(
                 loop, 
                 DDI_predictor, 
                 DDI_sampler, 
                 predictor_optim, 
                 sampler_optim, 
-                adj_matrix, 
+                edge_index, 
+                edge_rel,
                 train_reward, 
-                args
+                args,
+                dataset_statistics
             )
-            eval_acc, eval_f1, eval_auc, eval_aupr, eval_loss = eval(test_loader, DDI_predictor, DDI_sampler, adj_matrix, args)
-            print(f"train_auc:{train_auc} train_aupr:{train_aupr} eval_auc:{eval_auc} eval_aupr:{eval_aupr}")
+
+            eval_acc, eval_f1, eval_auc, eval_aupr, eval_loss, eval_rewrad = eval(test_loader, DDI_predictor, DDI_sampler, edge_index, edge_rel, dataset_statistics, args)
+            print(f"train_auc:{train_auc} train_aupr:{train_aupr} train_reward: {train_reward} eval_auc:{eval_auc} eval_aupr:{eval_aupr}, eval_reward: {eval_rewrad}")
 
             train_log['train_acc'].append(train_acc)
             train_log['train_auc'].append(train_auc)
@@ -280,10 +338,28 @@ def main(args = None, k_fold = 5):
             train_log['eval_auc'].append(eval_auc)
             train_log['eval_aupr'].append(eval_aupr)
             train_log['eval_loss'].append(eval_loss)
+            train_log['eval_rewrad'].append(eval_rewrad)
+
+            best_model_state11 = copy.deepcopy(DDI_predictor.state_dict())
+            best_model_state22 = copy.deepcopy(DDI_sampler.state_dict())
+            if args.mode == 's2':
+                save_dir = os.path.join('./best_save/', args.model_name, args.dataset, args.extractor, '{}-{}-{}'.format(args.neg, args.pos, args.mode),
+                                        "fold_{}".format(fold), "{:.5f}".format(train_reward))
+            elif args.mode == 's1':
+                save_dir = os.path.join('./best_save/', args.model_name, args.dataset, args.extractor, args.mode,
+                                        "fold_{}".format(fold), "{:.5f}".format(eval_auc))
+            else:
+                save_dir = None
+            
+            if save_dir is not None:
+                if not os.path.exists(save_dir):
+                    os.makedirs(save_dir)
+                torch.save(best_model_state11, os.path.join(save_dir, 'DDI_predictor.pt'))
+                torch.save(best_model_state22, os.path.join(save_dir, 'DDI_sampler.pt'))
 
             if eval_auc > best_auc:
                 best_model_state1 = copy.deepcopy(DDI_predictor.state_dict())
-                # best_model_state2 = copy.deepcopy(DDI_sampler.state_dict())
+                best_model_state2 = copy.deepcopy(DDI_sampler.state_dict())
                 best_auc = eval_auc
                 early_stop_num = 0
             else:
@@ -296,17 +372,21 @@ def main(args = None, k_fold = 5):
         # model.to(device)
         # test_log = test(test_loader, model) ##test_log是一个字典，里面存储着metrics
 
-        save_dir = os.path.join('./best_save/', args.model_name, args.dataset, args.extractor,
-                                "fold_{}".format(fold), "{:.5f}".format(best_auc))
+        if args.mode == 's2':
+            save_dir = os.path.join('./best_save/', args.model_name, args.dataset, args.extractor, '{}-{}-{}'.format(args.neg, args.pos, args.mode),
+                                    "fold_{}".format(fold), "best")
+        else:
+            save_dir = os.path.join('./best_save/', args.model_name, args.dataset, args.extractor, args.mode,
+                                    "fold_{}".format(fold), "{:.5f}".format(best_auc))
         if not os.path.exists(save_dir):
             os.makedirs(save_dir)
-        # model.save(save_dir)
         torch.save(best_model_state1, os.path.join(save_dir, 'DDI_predictor.pt'))
-        # torch.save(best_model_state2, os.path.join(save_dir, 'DDI_sampler.pt'))
+        torch.save(best_model_state2, os.path.join(save_dir, 'DDI_sampler.pt'))
         test_log = {}
         save(save_dir, args, train_log, test_log)
         print(f"save to {save_dir}")
         # results_of_each_fold.append(test_log)
+        exit()
 
 
     save_results(os.path.join('./best_save/', args.model_name, args.dataset), args, results_of_each_fold)
