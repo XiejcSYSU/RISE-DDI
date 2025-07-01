@@ -59,7 +59,16 @@ python main.py -dataset drugbank/kegg/ogbl-biokg -extractor khop-subtree/randomW
 
 The hyper-parameters used to train TIGER on above three datasets are shown in our paper.
 
-CUDA_VISIBLE_DEVICES=3 python -u main.py --dataset drugbank --extractor RL --epoch 100 --sampler_lr 0.001 --layer 1 --pos 2.5 --neg 1 --mode s2  2>&1 | tee ./best_save/1-3-t2.out
+CUDA_VISIBLE_DEVICES=6 python -u main.py --dataset drugbank --extractor RL --epoch 100 --sampler_lr 0.001 --layer 1 --khop 1 --pos 2 --neg 1 --mode s4 --k_step 5
 
-CUDA_VISIBLE_DEVICES=4 python -u main.py --dataset drugbank --extractor khop-subtree --khop 1 --layer 1 --mode s3
+CUDA_VISIBLE_DEVICES=0 python -u main.py --dataset drugbank --extractor khop-subtree --khop 1 --layer 1 --mode s3  --eps 5e-6
+CUDA_VISIBLE_DEVICES=0 python -u main.py --dataset kegg --extractor khop-subtree --khop 1 --layer 1 --mode s3 --eps 3e-6
 
+
+CUDA_VISIBLE_DEVICES=0 python -u main.py --dataset ogbl-biokg --extractor khop-subtree --khop 1 --layer 1 --mode s3 --eps 3e-6
+
+CUDA_VISIBLE_DEVICES=0 nohup python -u main.py --dataset ogbl-biokg --extractor randomWalk --khop 1 --layer 1 --mode s3 --eps 3e-6 2>&1 | tee /home/xiejc/Code/TIGER/RL/best_save/tiger/ogbl-biokg/dw.log
+
+
+
+CUDA_VISIBLE_DEVICES=3 nohup python -u main.py --dataset drugbank --extractor khop-subtree --khop 2 --layer 2 --mode s3  --eps 5e-6 --no_tqdm 2>&1 | tee /home/xiejc/Code/TIGER/RL/best_save/tiger/drugbank/layer2.log

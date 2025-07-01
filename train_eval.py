@@ -36,7 +36,7 @@ def train(loop, DDI_predictor, DDI_sampler, predictor_optim, sampler_optim, adj_
                 subgraph = DDI_sampler.predict(data_idx, adj_matrix, edge_rel) # Data()
                 predicts, loss = DDI_predictor(data_mol1, data_mol2, subgraph)
             else: # used default subgraph
-                predicts, loss = DDI_predictor(data_mol1, data_mol2, data_subgraph)
+                predicts, loss, att_weights = DDI_predictor(data_mol1, data_mol2, data_subgraph)
             loss.backward()
 
             prob_all.append(predicts)
@@ -103,7 +103,7 @@ def train(loop, DDI_predictor, DDI_sampler, predictor_optim, sampler_optim, adj_
                     selected_subgraph_list, batch = DDI_sampler.predict(data_idx, adj_matrix, edge_rel, embeddings, data_subgraph) 
                 selected_subgraph_list = selected_subgraph_list.cuda()
                 batch = batch.cuda()
-                predicts, loss = DDI_predictor(data_mol1, data_mol2, selected_subgraph_list)
+                predicts, loss, _ = DDI_predictor(data_mol1, data_mol2, selected_subgraph_list)
             else: # used default subgraph
                 predicts, loss = DDI_predictor(data_mol1, data_mol2, data_subgraph)
             loss.backward()
@@ -197,7 +197,7 @@ def eval(loader, DDI_predictor, DDI_sampler, adj_matrix, edge_rel, dataset_stati
 
                 predicts, loss = DDI_predictor(data_mol1, data_mol2, selected_subgraph_list)
             elif args.mode == 's3':
-                predicts, loss = DDI_predictor(data_mol1, data_mol2, data_subgraph)
+                predicts, loss, att_weights = DDI_predictor(data_mol1, data_mol2, data_subgraph)
             elif args.mode == 's2' or args.mode == 's4':
                 batch = torch.tensor(range(data_idx.shape[0])).cuda()
                 pred_default = DDI_predictor.pred(data_mol1, data_mol2, data_subgraph, batch)

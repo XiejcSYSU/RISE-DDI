@@ -126,7 +126,7 @@ class Sampler(torch.nn.Module):
             current_nodes = node_pair
             subset, _, _, _ = k_hop_subgraph(
                 node_idx=node_pair,  
-                num_hops=1,         
+                num_hops=self.args.layer,         
                 edge_index=adj_matrix,  
                 relabel_nodes=False  
             )
@@ -245,7 +245,7 @@ class Sampler(torch.nn.Module):
                 current_nodes = node_pair
                 subset, _, _, _ = k_hop_subgraph(
                     node_idx=node_pair,  
-                    num_hops=1,         
+                    num_hops=self.args.layer,         
                     edge_index=adj_matrix,  
                     relabel_nodes=False  
                 )
@@ -373,6 +373,13 @@ class Sampler(torch.nn.Module):
 
         edge_index, edge_rel = subgraph(current_nodes, adj_matrix, edge_rels, relabel_nodes=True)
         x = current_nodes.cpu()
+
+        mask = torch.ones(edge_index.shape[1], dtype=torch.bool).to(edge_index.device)
+        mask &= ~((edge_index[0] == 0) & (edge_index[1] == 1))
+        mask &= ~((edge_index[0] == 1) & (edge_index[1] == 0))
+
+        edge_index = edge_index[:, mask]
+        edge_rel = edge_rel[mask]
         
         G_sub = DATA.Data(x=x,
                   edge_index=edge_index,

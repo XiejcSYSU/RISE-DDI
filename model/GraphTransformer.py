@@ -236,7 +236,7 @@ class GraphTransformer(torch.nn.Module):
             representation = x[data.id.nonzero().flatten()]
             drug1_embedding = representation[0::2]
             drug2_embedding = representation[1::2]
-            return drug1_embedding, drug2_embedding
+            return drug1_embedding, drug2_embedding, x
 
 
 

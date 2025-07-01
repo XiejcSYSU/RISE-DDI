@@ -9,14 +9,15 @@ import json
 import copy
 from utils import *
 from sklearn.metrics import f1_score, roc_auc_score, average_precision_score
-from model.predictor import Predictor
+from model.predictor import Predictor, Predictor2
 from model.sampler import Sampler
 from torch_geometric.utils import degree
 from torch.utils.data.distributed import DistributedSampler
-from data_process import smile_to_graph, read_smiles, read_interactions, generate_node_subgraphs, read_network, process_node_graph
+from data_process import smile_to_graph, read_smiles, read_interactions, generate_node_subgraphs, read_network, process_node_graph, read_ppr
 from sklearn.model_selection import StratifiedKFold, KFold
 from train_eval import train, test, eval
 import random
+import pickle
 
 import pdb
 import sys
@@ -42,6 +43,9 @@ def init_args(user_args=None):
     parser.add_argument('--sampler_lr', type=float, default=0.1)
     parser.add_argument('--weight_decay', type=float, default=0.0001)
     parser.add_argument('--batch_size', type=int, default=128)
+    parser.add_argument('--eps', type=float, default=5e-6)
+    parser.add_argument('--no_tqdm', action='store_true')
+
 
     parser.add_argument('--pos', type=float, default=3)
     parser.add_argument('--neg', type=float, default=1)
@@ -65,7 +69,9 @@ def init_args(user_args=None):
     parser.add_argument("--dropout", type=float, default=0.2)
     parser.add_argument("--k_step", type=int, default=10)
 
-    
+    # Linkformer
+    parser.add_argument("--num_heads_l", type=int, default=1)
+    parser.add_argument("--num_layers_l", type=int, default=1)
 
 
     # coeff
@@ -92,7 +98,7 @@ def setup_seed(seed):
     torch.manual_seed(seed)
     torch.cuda.manual_seed(seed)
     torch.cuda.manual_seed_all(seed)
-    torch.use_deterministic_algorithms(True)
+    # torch.use_deterministic_algorithms(True)
     os.environ['CUBLAS_WORKSPACE_CONFIG']=':4096:8'
 
 
@@ -118,13 +124,19 @@ def k_fold(data, kf, folds, y):
 
     return train_indices, test_indices, val_indices
 
-def split_fold(folds, dataset, labels, scenario_type='random'):
+def split_fold(folds, dataset, labels, args, scenario_type='random'):
 
     test_indices, train_indices, val_indices = [], [], []
 
     if scenario_type == 'random':
         skf = StratifiedKFold(folds, shuffle=True, random_state=2023)
         train_indices, test_indices, val_indices = k_fold(dataset, skf, folds, labels)
+    elif scenario_type == 'inductive':
+        with open(f'data/{args.dataset}/inductive_split.pkl', 'rb') as f:
+            data = pickle.load(f)
+        train_indices = data['train']
+        test_indices = data['test']
+        val_indices = data['val']
 
     return train_indices, test_indices, val_indices
 
@@ -144,12 +156,16 @@ def load_data(args):
 
     print("load networks !!")
     num_node, network_edge_index, network_rel_index, num_rel = read_network(data_path + "networks.txt")
+    num_node += 1
 
     print("load DDI samples!!")
     interactions_label, all_contained_drgus = read_interactions(os.path.join(data_path, "ddi.txt"), smile_graph)
     interactions = interactions_label[:, :2]
     labels = interactions_label[:, 3]
 
+    print("Load PPR network!!")
+    all_drug_node = np.unique(interactions.flatten())
+    ppr = read_ppr(args.dataset, network_edge_index, num_node, all_drug_node, 0.15, args.eps)
 
     print("generate subgraphs!!")
     drug_subgraphs, max_subgraph_degree, num_rel_update = generate_node_subgraphs(dataset, all_contained_drgus,
@@ -157,13 +173,14 @@ def load_data(args):
                                                                                   num_rel, args)
 
     data_sta = {
-        'num_nodes': num_node + 1,
+        'num_nodes': num_node,
         'num_rel_mol': num_rel_mol_update + 1,
         'num_rel_graph': num_rel,
         'num_interactions': len(interactions),
         'num_drugs_DDI': len(all_contained_drgus),
         'max_degree_graph': max_smiles_degree + 1,
-        'max_degree_node': int(max_subgraph_degree)+1
+        'max_degree_node': int(max_subgraph_degree)+1,
+        'ppr': ppr
     }
 
     print(data_sta)
@@ -215,7 +232,7 @@ def save_results(save_dir, args, results_list):
 
 
 def init_model(args, dataset_statistics):
-    DDI_predictor = Predictor(max_layer=args.layer,
+    DDI_predictor = Predictor2(max_layer=args.layer,
                     num_features_drug = 67,
                     num_nodes=dataset_statistics['num_nodes'],
                     num_relations_mol=dataset_statistics['num_rel_mol'],
@@ -227,6 +244,7 @@ def init_model(args, dataset_statistics):
                     mi_coeff=args.mi_coeff,
                     dropout=args.dropout,
                     device=torch.device('cuda' if torch.cuda.is_available() else 'cpu'),
+                    ppr=dataset_statistics['ppr'],
                     args=args)
     
     DDI_sampler = Sampler(args, dataset_statistics['num_nodes'])
@@ -253,23 +271,22 @@ def main(args = None, k_fold = 5):
 
     edge_index = torch.tensor(adj_matrix).T
     edge_rel = torch.tensor(edge_rel)
-    node_graph = process_node_graph(data, node_graph, edge_index, edge_rel, args)
+    node_graph2 = process_node_graph(data, node_graph, edge_index, edge_rel, args)
 
 
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
 
     setup_seed(42)
     ##split datasets
-    for fold, (train_idx, test_idx, val_idx) in enumerate(zip(*split_fold(k_fold, data, labels, args.s_type))):
+    for fold, (train_idx, test_idx, val_idx) in enumerate(zip(*split_fold(k_fold, data, labels, args, args.s_type))):
         print(f"============================{fold+1}/{k_fold}==================================")
         print("loading data!!")
 
 
         ##load_data
-        train_data = DTADataset(x=data[train_idx], y=labels[train_idx], sub_graph=node_graph, smile_graph=smile_graph)
-        test_data = DTADataset(x=data[test_idx], y=labels[test_idx], sub_graph=node_graph, smile_graph=smile_graph)
-        eval_data = DTADataset(x=data[val_idx], y=labels[val_idx], sub_graph=node_graph, smile_graph=smile_graph)
-
+        train_data = DTADataset(x=data[train_idx], y=labels[train_idx], sub_graph=node_graph, smile_graph=smile_graph, sub_graph2=node_graph2)
+        test_data = DTADataset(x=data[test_idx], y=labels[test_idx], sub_graph=node_graph, smile_graph=smile_graph, sub_graph2=node_graph2)
+        eval_data = DTADataset(x=data[val_idx], y=labels[val_idx], sub_graph=node_graph, smile_graph=smile_graph, sub_graph2=node_graph2)
         edge_index = edge_index.cuda()
         edge_rel = edge_rel.cuda()
 
@@ -307,7 +324,7 @@ def main(args = None, k_fold = 5):
         train_reward = 0
 
         train_log = {'train_acc':[], 'train_auc':[], 'train_aupr':[], 'train_loss':[], 'train_reward':[],
-                        'eval_acc':[], 'eval_auc':[], 'eval_aupr':[], 'eval_loss':[], 'eval_rewrad':[]}
+                        'eval_f1':[], 'eval_acc':[], 'eval_auc':[], 'eval_aupr':[], 'eval_loss':[], 'eval_rewrad':[]}
         
         for i_episode in range(args.epoch):
             loop = tqdm(train_loader, ncols=80)
@@ -335,6 +352,7 @@ def main(args = None, k_fold = 5):
             train_log['train_reward'].append(train_reward)
 
             train_log['eval_acc'].append(eval_acc)
+            train_log['eval_f1'].append(eval_f1)
             train_log['eval_auc'].append(eval_auc)
             train_log['eval_aupr'].append(eval_aupr)
             train_log['eval_loss'].append(eval_loss)
@@ -368,9 +386,18 @@ def main(args = None, k_fold = 5):
                     print("early stop!")
                     break
 
-        # model.load_state_dict(best_model_state)
+        # DDI_predictor.load_state_dict(best_model_state1)
+        # DDI_sampler.load_state_dict(best_model_state2)
         # model.to(device)
         # test_log = test(test_loader, model) ##test_log是一个字典，里面存储着metrics
+
+        best_epoch = np.argmax(np.array(train_log['eval_auc']))
+        print('Best epoch: %d' % best_epoch)
+        print('acc: %.4f' % train_log['eval_acc'][best_epoch])
+        print('f1: %.4f' % train_log['eval_f1'][best_epoch])
+        print('auc: %.4f' % train_log['eval_auc'][best_epoch])
+        print('aupr: %.4f' % train_log['eval_aupr'][best_epoch])
+
 
         if args.mode == 's2':
             save_dir = os.path.join('./best_save/', args.model_name, args.dataset, args.extractor, '{}-{}-{}'.format(args.neg, args.pos, args.mode),
@@ -386,7 +413,6 @@ def main(args = None, k_fold = 5):
         save(save_dir, args, train_log, test_log)
         print(f"save to {save_dir}")
         # results_of_each_fold.append(test_log)
-        exit()
 
 
     save_results(os.path.join('./best_save/', args.model_name, args.dataset), args, results_of_each_fold)

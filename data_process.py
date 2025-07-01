@@ -16,6 +16,11 @@ from torch import Tensor
 import numpy as np
 import pickle
 from tqdm import tqdm
+from time import time
+from torch_geometric.utils import coalesce, to_undirected
+import numba
+from torch_sparse import SparseTensor 
+
 
 
 e_map = {
@@ -235,6 +240,9 @@ def read_network(path):
             else:
                 flag += 1
                 head, tail, rel = line.strip().split(" ")[:3]
+                if 'drugbank' in path:
+                    if int(head) in [9, 11, 12, 1451, 49] or int(tail) in [9, 11, 12, 1451, 49]:
+                        continue
                 edge_index.append([int(head), int(tail)])
                 rel_index.append(int(rel))
 
@@ -258,7 +266,8 @@ def process_node_graph(data, node_graph, edge_index, edge_rel, args):
 
     # paths = "data/" + str(args.dataset) + "/" + str(args.extractor) + "/"
     paths = "data/" + str(args.dataset) + "/" + 'khop-subtree' + "/"
-    json_path = paths + "hop_" + str(args.khop) + "_fixed_"  + str(args.fixed_num) + ".pkl"
+    # paths = "data/" + str(args.dataset) + "/" + 'randomWalk' + "/"
+    json_path = paths + "hop_" + str(args.khop) + "_fixed2_"  + str(args.fixed_num) + ".pkl"
     if os.path.exists(json_path):
         with open(json_path, 'rb') as f:
             subgraphs = pickle.load(f)
@@ -271,13 +280,23 @@ def process_node_graph(data, node_graph, edge_index, edge_rel, args):
         drug1_id = d[0]
         drug2_id = d[1]
 
-        subset1, subgraph_edge_index1, subgraph_rel1, mapping_id1, s_edge_index1, s_value1, s_rel1, deg1 = node_graph[str(drug1_id)]
-        subset2, subgraph_edge_index2, subgraph_rel2, mapping_id2, s_edge_index2, s_value2, s_rel2, deg2 = node_graph[str(drug2_id)]
-
+        subset1, subgraph_edge_index1, subgraph_rel1, mapping_id1, s_edge_index1, s_value1, s_rel1, _ = node_graph[str(drug1_id)]
+        subset2, subgraph_edge_index2, subgraph_rel2, mapping_id2, s_edge_index2, s_value2, s_rel2, _ = node_graph[str(drug2_id)]
 
         subset1 = torch.LongTensor(subset1)
         subset2 = torch.LongTensor(subset2)
 
+        # subgraph_edge_index1 = torch.LongTensor(subgraph_edge_index1)
+        # subgraph_edge_index2 = torch.LongTensor(subgraph_edge_index2)
+
+        # mapping_id1 = torch.LongTensor(mapping_id1)
+        # mapping_id2 = torch.LongTensor(mapping_id2)
+        
+
+        # subgraph_rel1 = torch.tensor(subgraph_rel1, dtype=int)
+        # subgraph_rel2 = torch.tensor(subgraph_rel2, dtype=int)
+        # s_value1 = torch.tensor(s_value1, dtype=torch.float)
+        # s_value2 = torch.tensor(s_value2, dtype=torch.float)
         x = torch.cat([subset1, subset2], dim=0)
         x = torch.unique(x, dim=0)
 
@@ -299,7 +318,21 @@ def process_node_graph(data, node_graph, edge_index, edge_rel, args):
                     sp_edge_rel=edge_rel2
                 )
         subgraphs[(drug1_id, drug2_id)] = G
-        subgraphs[(drug2_id, drug1_id)] = G
+
+        # n1 = len(subset1)
+        # subgraph_edge_index2 = subgraph_edge_index2 + n1
+        # merged_edge_index = torch.cat([subgraph_edge_index1.transpose(1,0), subgraph_edge_index2.transpose(1,0)], dim=1)
+        
+        # G =  DATA.Data(
+        #     x=torch.cat([subset1, subset2], dim=0),
+        #     edge_index=merged_edge_index,
+        #     id=torch.cat([mapping_id1, mapping_id2], dim=0),
+        #     rel_index=torch.cat([subgraph_rel1, subgraph_rel2], dim=0),
+        #     sp_edge_index=merged_edge_index,
+        #     sp_value=torch.cat([s_value1, s_value2], dim=0),
+        #     sp_edge_rel=torch.cat([subgraph_rel1, subgraph_rel2], dim=0),
+        # )
+        # subgraphs[(drug1_id, drug2_id)] = G
 
     with open(json_path, 'wb') as f:
         pickle.dump(subgraphs, f)
@@ -343,6 +376,8 @@ def generate_node_subgraphs(dataset, drug_id, network_edge_index, network_rel_in
     if not os.path.exists(paths):
         os.mkdir(paths)
 
+    # args.fixed_num = None
+
     if method == "khop-subtree":
         subgraphs, max_degree, max_rel_num = subtreeExtractor(drug_id, undirected_edge_index, rel_index, paths, num_rel,
                                                               fixed_num=args.fixed_num, khop=args.khop)
@@ -364,8 +399,9 @@ def subtreeExtractor(drug_id, edge_index, rel_index, shortest_paths, num_rel, fi
     all_degree = []
     num_rel_update = []
     subgraphs = {}
+    print(edge_index.shape)
 
-    json_path = shortest_paths + "subtree_fixed_" + str(fixed_num) + "_hop_" + str(khop) + "sp.json"
+    json_path = shortest_paths + "subtree_fixed2_" + str(fixed_num) + "_hop_" + str(khop) + "sp.json"
     if os.path.exists(json_path):
         with open(json_path, 'r') as f:
             subgraphs = json.load(f)
@@ -527,7 +563,8 @@ def rwExtractor(drug_id, edge_index, rel_index, shortest_paths, num_rel, sub_num
 
     my_graph = nx.Graph()
     my_graph.add_edges_from(edge_index.transpose(1,0).numpy().tolist())
-    undirected_rel_index = torch.cat((rel_index, rel_index), 0)
+    # undirected_rel_index = torch.cat((rel_index, rel_index), 0)
+    undirected_rel_index = rel_index
 
     num_rel_update = []
     max_degree = []
@@ -697,3 +734,139 @@ def google_matrix(
     M /= M.sum(axis=1).astype('float32')  # Normalize rows to sum to 1
 
     return np.multiply(alpha, M, dtype='float32') + np.multiply(1 - alpha, p, dtype='float32')
+
+def get_ppr_matrix(edge_index, num_nodes, all_drug_node, alpha=0.15, eps=5e-5):
+    """
+    Calc PPR data
+
+    Returns scores and the corresponding nodes
+
+    Adapted from https://github.com/pyg-team/pytorch_geometric/blob/master/torch_geometric/transforms/gdc.py
+    """
+    edge_index = coalesce(edge_index, num_nodes=num_nodes)
+    print(edge_index)
+    edge_index_np = edge_index.cpu().numpy()
+
+    # Assumes sorted and coalesced edge indices (NOTE: coalesce also sorts edges)
+    indptr = torch._convert_indices_from_coo_to_csr(edge_index[0], num_nodes).cpu().numpy()
+    
+    out_degree = indptr[1:] - indptr[:-1]
+    
+    start = time()
+    print("Calculating PPR...", flush=True)
+    neighbors, neighbor_weights = calc_ppr(indptr, all_drug_node, edge_index_np[1], out_degree, alpha, eps)
+    print(f"Time: {time()-start:.2f} seconds")
+
+    # print("\n# Nodes with 0 PPR scores:", sum([len(x) == 1 for x in neighbors]))  # 1 bec. itself
+    # print(f"Mean # of scores per Node: {np.mean([len(x) for x in neighbors]):.1f}")
+
+    return neighbors, neighbor_weights
+
+def calc_ppr(
+    indptr: np.ndarray,
+    all_drug_node: np.ndarray,
+    indices: np.ndarray,
+    out_degree: np.ndarray,
+    alpha: float,
+    eps: float,
+):
+    r"""Calculate the personalized PageRank vector for all nodes
+    using a variant of the Andersen algorithm
+    (see Andersen et al. :Local Graph Partitioning using PageRank Vectors.)
+
+    Args:
+        indptr (np.ndarray): Index pointer for the sparse matrix
+            (CSR-format).
+        indices (np.ndarray): Indices of the sparse matrix entries
+            (CSR-format).
+        out_degree (np.ndarray): Out-degree of each node.
+        alpha (float): Alpha of the PageRank to calculate.
+        eps (float): Threshold for PPR calculation stopping criterion
+            (:obj:`edge_weight >= eps * out_degree`).
+
+    :rtype: (:class:`List[List[int]]`, :class:`List[List[float]]`)
+    """
+    alpha_eps = alpha * eps
+    js = [[0]] * len(out_degree)
+    vals = [[0.]] * len(out_degree)
+    # for inode_uint in tqdm(numba.prange(len(out_degree))):
+    for inode_uint in tqdm(all_drug_node):
+        # if inode_uint % 1000 == 0:
+        #     print(inode_uint)
+        inode = numba.int64(inode_uint)
+        p = {inode: 0.0}
+        r = {}
+        r[inode] = alpha
+        q = [inode]
+        while len(q) > 0:
+            unode = q.pop()
+
+            res = r[unode] if unode in r else 0
+            if unode in p:
+                p[unode] += res
+            else:
+                p[unode] = res
+            r[unode] = 0
+            for vnode in indices[indptr[unode]:indptr[unode + 1]]:
+                _val = (1 - alpha) * res / out_degree[unode]
+                if vnode in r:
+                    r[vnode] += _val
+                else:
+                    r[vnode] = _val
+
+                res_vnode = r[vnode] if vnode in r else 0
+                if res_vnode >= alpha_eps * out_degree[vnode]:
+                    if vnode not in q:
+                        q.append(vnode)
+        js[inode] = list(p.keys())
+        vals[inode] = list(p.values())
+
+    return js, vals
+
+
+def create_sparse_ppr_matrix(neighbors, neighbor_weights):
+    """
+    For all calculated pairs, we can arrange in a NxN sparse weighted Adj matrix 
+    """
+    ppr_scores = []
+    source_edge_ix, target_edge_ix = [], []
+    for source_ix, (source_neighbors, source_weights) in enumerate(zip(neighbors, neighbor_weights)):
+        source_edge_ix.extend([source_ix] * len(source_neighbors))
+        target_edge_ix.extend(source_neighbors)
+        ppr_scores.extend(source_weights)
+
+    source_edge_ix = torch.Tensor(source_edge_ix).unsqueeze(0)
+    target_edge_ix = torch.Tensor(target_edge_ix).unsqueeze(0)
+
+    ppr_scores = torch.Tensor(ppr_scores)
+    edge_ix = torch.cat((source_edge_ix, target_edge_ix), dim=0).long()
+
+    num_nodes = len(neighbors)
+    sparse_adj = SparseTensor.from_edge_index(edge_ix, ppr_scores, [num_nodes, num_nodes])
+
+    return sparse_adj
+
+def read_ppr(dataset, edge_index, num_nodes, all_drug_node, alpha, eps):
+    """
+    If PPR exists then load it in. Otherwise calculate it
+    """
+    paths = "data/" + str(dataset) + "/" 
+
+    alpha_str = str(alpha).replace('.', '')
+    eps_str = str(eps).replace('.', '')
+    filename = f"sparse_adj-{alpha_str}_eps-{eps_str}" + ".pt"
+    full_filename = paths + filename
+
+    if os.path.exists(full_filename):
+        print("PPR matrix exists. Loading from file...", flush=True)
+        sparse_adj = torch.load(full_filename)
+    else:
+        edge_index = torch.tensor(edge_index).T
+        neighbors, neighbor_weights = get_ppr_matrix(edge_index, num_nodes, all_drug_node, alpha, eps)
+        sparse_adj = create_sparse_ppr_matrix(neighbors, neighbor_weights)
+
+        print(f"Saving data to {full_filename}...", flush=True)
+        torch.save(sparse_adj, full_filename)
+    
+    # HACK: Stored as a SparseTensor. Convert to torch.sparse
+    return sparse_adj.to_torch_sparse_coo_tensor()

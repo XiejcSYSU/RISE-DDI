@@ -17,19 +17,20 @@ from torch_geometric.utils import degree, subgraph, k_hop_subgraph
 
 # initialize the dataset
 class DTADataset(InMemoryDataset):
-    def __init__(self, x=None, y=None, sub_graph=None, smile_graph=None):
+    def __init__(self, x=None, y=None, sub_graph=None, smile_graph=None, sub_graph2=None):
         super(DTADataset, self).__init__()
 
         self.labels = y
         self.drug_ID = x
         self.sub_graph = sub_graph
+        self.sub_graph2 = sub_graph2
         self.smile_graph = smile_graph
         #self.data_mol1, self.data_drug1, self.data_mol2, self.data_drug2 = self.process(x, y, sub_graph, smile_graph)
 
     def read_drug_info(self, drug_id, labels):
 
         c_size, features, edge_index, rel_index, sp_edge_index, sp_value, sp_rel, deg = self.smile_graph[str(drug_id)]  ##drug——id是str类型的，不是int型的，这点要注意
-        # subset, subgraph_edge_index, subgraph_rel, mapping_id, s_edge_index, s_value, s_rel, deg = self.sub_graph[str(drug_id)]
+        subset, subgraph_edge_index, subgraph_rel, mapping_id, s_edge_index, s_value, s_rel, deg = self.sub_graph[str(drug_id)]
 
         data_mol = DATA.Data(x=torch.Tensor(np.array(features)),
                               edge_index=torch.LongTensor(edge_index).transpose(1, 0),
@@ -41,17 +42,17 @@ class DTADataset(InMemoryDataset):
                               )
         data_mol.__setitem__('c_size', torch.LongTensor([c_size]))
 
-        # data_graph = DATA.Data(x=torch.LongTensor(subset),
-        #                         edge_index=torch.LongTensor(subgraph_edge_index).transpose(1,0),
-        #                         y=torch.LongTensor([labels]),
-        #                         id=torch.LongTensor(np.array(mapping_id, dtype=bool)),
-        #                         rel_index=torch.Tensor(np.array(subgraph_rel, dtype=int)),
-        #                         sp_edge_index=torch.LongTensor(s_edge_index).transpose(1, 0),
-        #                         sp_value=torch.Tensor(np.array(s_value, dtype=int)),
-        #                         sp_edge_rel=torch.LongTensor(np.array(s_rel, dtype=int))
-        #                         )
+        data_graph = DATA.Data(x=torch.LongTensor(subset),
+                                edge_index=torch.LongTensor(subgraph_edge_index).transpose(1,0),
+                                y=torch.LongTensor([labels]),
+                                id=torch.LongTensor(np.array(mapping_id, dtype=bool)),
+                                rel_index=torch.Tensor(np.array(subgraph_rel, dtype=int)),
+                                sp_edge_index=torch.LongTensor(s_edge_index).transpose(1, 0),
+                                sp_value=torch.Tensor(np.array(s_value, dtype=int)),
+                                sp_edge_rel=torch.LongTensor(np.array(s_rel, dtype=int))
+                                )
 
-        return data_mol
+        return data_mol, data_graph
     
     def merge_graph(self, data1, data2, idx):
         n1 = data1.num_nodes
@@ -84,14 +85,27 @@ class DTADataset(InMemoryDataset):
         drug2_id = self.drug_ID[idx, 1]
         labels = int(self.labels[idx])
 
-        drug1_mol = self.read_drug_info(drug1_id, labels)
-        drug2_mol = self.read_drug_info(drug2_id, labels)
+        drug1_mol, data_graph1 = self.read_drug_info(drug1_id, labels)
+        drug2_mol, data_graph2 = self.read_drug_info(drug2_id, labels)
 
         idx = torch.tensor([drug1_id, drug2_id]).unsqueeze(0)
 
-        sub_graph = self.sub_graph[(drug1_id, drug2_id)]
+        sub_graph = self.merge_graph(data_graph1, data_graph2, idx)
 
-        return drug1_mol, drug2_mol, sub_graph, idx
+        sub_graph2 = self.sub_graph2[(drug1_id, drug2_id)]
+        mask = torch.ones(sub_graph2.edge_index.shape[1], dtype=torch.bool)
+        assert sub_graph2.id[0] == 1 and sub_graph2.id[1] == 1
+
+        mask &= ~((sub_graph2.edge_index[0] == 0) & (sub_graph2.edge_index[1] == 1))
+        mask &= ~((sub_graph2.edge_index[0] == 1) & (sub_graph2.edge_index[1] == 0))
+
+        sub_graph2.edge_index = sub_graph2.edge_index[:, mask]
+        sub_graph2.sp_edge_index = sub_graph2.sp_edge_index[:, mask]
+        sub_graph2.rel_index = sub_graph2.rel_index[mask]
+        sub_graph2.sp_value = sub_graph2.sp_value[mask]
+        sub_graph2.sp_edge_rel = sub_graph2.sp_edge_rel[mask]
+
+        return drug1_mol, drug2_mol, sub_graph2, idx
 
 
 def collate(data_list):
