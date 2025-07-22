@@ -9,7 +9,7 @@ import json
 import copy
 from utils import *
 from sklearn.metrics import f1_score, roc_auc_score, average_precision_score
-from model.predictor import Predictor, Predictor2
+from model.predictor import Predictor
 from model.sampler import Sampler
 from torch_geometric.utils import degree
 from torch.utils.data.distributed import DistributedSampler
@@ -30,9 +30,9 @@ import sys
 
 def init_args(user_args=None):
 
-    parser = argparse.ArgumentParser(description='TIGER')
+    parser = argparse.ArgumentParser(description='RISE-DDI')
 
-    parser.add_argument('--model_name', type=str, default='tiger')
+    parser.add_argument('--model_name', type=str, default='RISE-DDI')
 
     parser.add_argument('--dataset', type=str, default="drugbank")
 
@@ -47,19 +47,15 @@ def init_args(user_args=None):
     parser.add_argument('--no_tqdm', action='store_true')
 
 
-    parser.add_argument('--pos', type=float, default=3)
+    parser.add_argument('--pos', type=float, default=2)
     parser.add_argument('--neg', type=float, default=1)
 
 
     parser.add_argument('--epoch', type=int, default=50)
-    parser.add_argument('--extractor', type=str, default="randomWalk") ##option [khop-subtree, randomWalk, probability]
+    parser.add_argument('--extractor', type=str, default="RL") 
     parser.add_argument('--graph_fixed_num', type=int, default=1)
     parser.add_argument('--khop', type=int, default=1)
     parser.add_argument('--fixed_num', type=int, default=32)
-
-    parser.add_argument('--mode', type=str, default="s1") 
-    parser.add_argument('--load_predictor', type=str, default="./best_save/tiger/drugbank/khop-subtree/s3/fold_0/0.85018/DDI_predictor.pt")
-    parser.add_argument('--load_sampler', type=str, default="")
 
     # Graphormer
     parser.add_argument("--d_dim", type=int, default=64)
@@ -145,7 +141,7 @@ def load_data(args):
 
     dataset = args.dataset
 
-    data_path = "/bigdat2/user/xiejc/zhangc/dataset/TIGER/dataset/" + dataset + "/"
+    data_path = "./data/" + dataset + "/"
 
     ligands = read_smiles(os.path.join(data_path, "drug_smiles.txt"))
 
@@ -232,7 +228,7 @@ def save_results(save_dir, args, results_list):
 
 
 def init_model(args, dataset_statistics):
-    DDI_predictor = Predictor2(max_layer=args.layer,
+    DDI_predictor = Predictor(max_layer=args.layer,
                     num_features_drug = 67,
                     num_nodes=dataset_statistics['num_nodes'],
                     num_relations_mol=dataset_statistics['num_rel_mol'],
@@ -261,18 +257,11 @@ def main(args = None, k_fold = 5):
 
     results_of_each_fold = []
 
-    ##加载interactions的data
-
     data, labels, smile_graph, node_graph, dataset_statistics, adj_matrix, edge_rel = load_data(args)
-
-    # selected_indices = np.random.choice(data.shape[0], size=data.shape[0]//2, replace=False)
-    # data = data[selected_indices]
-    # labels = labels[selected_indices]
 
     edge_index = torch.tensor(adj_matrix).T
     edge_rel = torch.tensor(edge_rel)
     node_graph2 = process_node_graph(data, node_graph, edge_index, edge_rel, args)
-
 
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
 
@@ -281,7 +270,6 @@ def main(args = None, k_fold = 5):
     for fold, (train_idx, test_idx, val_idx) in enumerate(zip(*split_fold(k_fold, data, labels, args, args.s_type))):
         print(f"============================{fold+1}/{k_fold}==================================")
         print("loading data!!")
-
 
         ##load_data
         train_data = DTADataset(x=data[train_idx], y=labels[train_idx], sub_graph=node_graph, smile_graph=smile_graph, sub_graph2=node_graph2)
@@ -299,23 +287,6 @@ def main(args = None, k_fold = 5):
         DDI_sampler.to(device)
         DDI_predictor.reset_parameters()
 
-        """Load pretrained model"""
-        if args.mode == 's1': 
-            """Train predictor using trained sampler"""
-            # DDI_sampler.load_state_dict(torch.load('/home/xiejc/Code/TIGER/RL/best_save/tiger/drugbank/RL/fold_0/0.00000/DDI_sampler.pt'))
-            DDI_sampler.load_state_dict(torch.load(args.load_sampler))
-        elif args.mode == 's2': 
-            """Train sampler using trained predictor"""
-            # DDI_predictor.load_state_dict(torch.load('/home/xiejc/Code/TIGER/RL/best_save/tiger/drugbank/randomWalk/fold_0/0.86878/DDI_predictor.pt')) # 1-hop-RW
-            # DDI_predictor.load_state_dict(torch.load('/home/xiejc/Code/TIGER/RL/best_save/tiger/drugbank/khop-subtree/fold_0/0.87003/DDI_predictor.pt')) # 1-hop-k
-            DDI_predictor.load_state_dict(torch.load(args.load_predictor))
-        elif args.mode == 's3':
-            """Train predictor without sampler"""
-            pass
-        elif args.mode == 's4':
-            """Train both predictor and sampler"""
-            pass
-        
 
         ##train_model
         #trange = tqdm(range(1, args.epoch + 1))
@@ -342,7 +313,7 @@ def main(args = None, k_fold = 5):
                 dataset_statistics
             )
 
-            eval_acc, eval_f1, eval_auc, eval_aupr, eval_loss, eval_rewrad = eval(test_loader, DDI_predictor, DDI_sampler, edge_index, edge_rel, dataset_statistics, args)
+            eval_acc, eval_f1, eval_auc, eval_aupr, eval_loss, eval_rewrad = eval(eval_loader, DDI_predictor, DDI_sampler, edge_index, edge_rel, dataset_statistics, args)
             print(f"train_auc:{train_auc} train_aupr:{train_aupr} train_reward: {train_reward} eval_auc:{eval_auc} eval_aupr:{eval_aupr}, eval_reward: {eval_rewrad}")
 
             train_log['train_acc'].append(train_acc)
@@ -358,23 +329,7 @@ def main(args = None, k_fold = 5):
             train_log['eval_loss'].append(eval_loss)
             train_log['eval_rewrad'].append(eval_rewrad)
 
-            best_model_state11 = copy.deepcopy(DDI_predictor.state_dict())
-            best_model_state22 = copy.deepcopy(DDI_sampler.state_dict())
-            if args.mode == 's2':
-                save_dir = os.path.join('./best_save/', args.model_name, args.dataset, args.extractor, '{}-{}-{}'.format(args.neg, args.pos, args.mode),
-                                        "fold_{}".format(fold), "{:.5f}".format(train_reward))
-            elif args.mode == 's1':
-                save_dir = os.path.join('./best_save/', args.model_name, args.dataset, args.extractor, args.mode,
-                                        "fold_{}".format(fold), "{:.5f}".format(eval_auc))
-            else:
-                save_dir = None
             
-            if save_dir is not None:
-                if not os.path.exists(save_dir):
-                    os.makedirs(save_dir)
-                torch.save(best_model_state11, os.path.join(save_dir, 'DDI_predictor.pt'))
-                torch.save(best_model_state22, os.path.join(save_dir, 'DDI_sampler.pt'))
-
             if eval_auc > best_auc:
                 best_model_state1 = copy.deepcopy(DDI_predictor.state_dict())
                 best_model_state2 = copy.deepcopy(DDI_sampler.state_dict())
@@ -386,36 +341,25 @@ def main(args = None, k_fold = 5):
                     print("early stop!")
                     break
 
-        # DDI_predictor.load_state_dict(best_model_state1)
-        # DDI_sampler.load_state_dict(best_model_state2)
-        # model.to(device)
-        # test_log = test(test_loader, model) ##test_log是一个字典，里面存储着metrics
+        DDI_predictor.load_state_dict(best_model_state1)
+        DDI_sampler.load_state_dict(best_model_state2)
+        eval_acc, eval_f1, eval_auc, eval_aupr, eval_loss, eval_rewrad = eval(test_loader, DDI_predictor, DDI_sampler, edge_index, edge_rel, dataset_statistics, args)
+
 
         best_epoch = np.argmax(np.array(train_log['eval_auc']))
         print('Best epoch: %d' % best_epoch)
-        print('acc: %.4f' % train_log['eval_acc'][best_epoch])
-        print('f1: %.4f' % train_log['eval_f1'][best_epoch])
-        print('auc: %.4f' % train_log['eval_auc'][best_epoch])
-        print('aupr: %.4f' % train_log['eval_aupr'][best_epoch])
+        print('acc: %.4f' % eval_acc)
+        print('f1: %.4f' % eval_f1)
+        print('auc: %.4f' % eval_auc)
+        print('aupr: %.4f' % eval_aupr)
 
 
-        if args.mode == 's2':
-            save_dir = os.path.join('./best_save/', args.model_name, args.dataset, args.extractor, '{}-{}-{}'.format(args.neg, args.pos, args.mode),
-                                    "fold_{}".format(fold), "best")
-        else:
-            save_dir = os.path.join('./best_save/', args.model_name, args.dataset, args.extractor, args.mode,
-                                    "fold_{}".format(fold), "{:.5f}".format(best_auc))
+        save_dir = os.path.join('./best_save/', args.model_name, args.dataset, args.extractor, args.mode,
+                                "fold_{}".format(fold), "{:.5f}".format(best_auc))
         if not os.path.exists(save_dir):
             os.makedirs(save_dir)
         torch.save(best_model_state1, os.path.join(save_dir, 'DDI_predictor.pt'))
         torch.save(best_model_state2, os.path.join(save_dir, 'DDI_sampler.pt'))
-        test_log = {}
-        save(save_dir, args, train_log, test_log)
-        print(f"save to {save_dir}")
-        # results_of_each_fold.append(test_log)
-
-
-    save_results(os.path.join('./best_save/', args.model_name, args.dataset), args, results_of_each_fold)
 
     return
 

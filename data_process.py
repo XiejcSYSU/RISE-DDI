@@ -22,7 +22,6 @@ import numba
 from torch_sparse import SparseTensor 
 
 
-
 e_map = {
     'bond_type': [
         'UNSPECIFIED',
@@ -265,9 +264,12 @@ def read_network(path):
 def process_node_graph(data, node_graph, edge_index, edge_rel, args):
 
     # paths = "data/" + str(args.dataset) + "/" + str(args.extractor) + "/"
-    paths = "data/" + str(args.dataset) + "/" + 'khop-subtree' + "/"
-    # paths = "data/" + str(args.dataset) + "/" + 'randomWalk' + "/"
-    json_path = paths + "hop_" + str(args.khop) + "_fixed2_"  + str(args.fixed_num) + ".pkl"
+    if args.dataset == 'ogbl-biokg':
+        paths = "data/" + str(args.dataset) + "/" + 'randomWalk' + "/"
+        json_path = paths + "rw_num_" + str(args.graph_fixed_num) + "_length_" + str(args.fixed_num) + "pkl"
+    else:
+        paths = "data/" + str(args.dataset) + "/" + 'khop-subtree' + "/"
+        json_path = paths + "hop_" + str(args.khop) + "_fixed2_"  + str(args.fixed_num) + ".pkl"
     if os.path.exists(json_path):
         with open(json_path, 'rb') as f:
             subgraphs = pickle.load(f)
@@ -286,17 +288,6 @@ def process_node_graph(data, node_graph, edge_index, edge_rel, args):
         subset1 = torch.LongTensor(subset1)
         subset2 = torch.LongTensor(subset2)
 
-        # subgraph_edge_index1 = torch.LongTensor(subgraph_edge_index1)
-        # subgraph_edge_index2 = torch.LongTensor(subgraph_edge_index2)
-
-        # mapping_id1 = torch.LongTensor(mapping_id1)
-        # mapping_id2 = torch.LongTensor(mapping_id2)
-        
-
-        # subgraph_rel1 = torch.tensor(subgraph_rel1, dtype=int)
-        # subgraph_rel2 = torch.tensor(subgraph_rel2, dtype=int)
-        # s_value1 = torch.tensor(s_value1, dtype=torch.float)
-        # s_value2 = torch.tensor(s_value2, dtype=torch.float)
         x = torch.cat([subset1, subset2], dim=0)
         x = torch.unique(x, dim=0)
 
@@ -318,21 +309,6 @@ def process_node_graph(data, node_graph, edge_index, edge_rel, args):
                     sp_edge_rel=edge_rel2
                 )
         subgraphs[(drug1_id, drug2_id)] = G
-
-        # n1 = len(subset1)
-        # subgraph_edge_index2 = subgraph_edge_index2 + n1
-        # merged_edge_index = torch.cat([subgraph_edge_index1.transpose(1,0), subgraph_edge_index2.transpose(1,0)], dim=1)
-        
-        # G =  DATA.Data(
-        #     x=torch.cat([subset1, subset2], dim=0),
-        #     edge_index=merged_edge_index,
-        #     id=torch.cat([mapping_id1, mapping_id2], dim=0),
-        #     rel_index=torch.cat([subgraph_rel1, subgraph_rel2], dim=0),
-        #     sp_edge_index=merged_edge_index,
-        #     sp_value=torch.cat([s_value1, s_value2], dim=0),
-        #     sp_edge_rel=torch.cat([subgraph_rel1, subgraph_rel2], dim=0),
-        # )
-        # subgraphs[(drug1_id, drug2_id)] = G
 
     with open(json_path, 'wb') as f:
         pickle.dump(subgraphs, f)
@@ -361,15 +337,10 @@ def read_smiles(path):
 def generate_node_subgraphs(dataset, drug_id, network_edge_index, network_rel_index, num_rel, args):
 
     method = args.extractor
-    # if method == 'RL':
-    #     method = 'randomWalk'
     edge_index = torch.from_numpy(np.array(network_edge_index).T) ##[2, num_edges]
     rel_index = torch.from_numpy(np.array(network_rel_index))
 
     undirected_edge_index = edge_index
-    # row, col = edge_index
-    # reverse_edge_index = torch.stack((col, row),0)
-    # undirected_edge_index = torch.cat((edge_index, reverse_edge_index),1)
 
     paths = "data/" + str(dataset) + "/" + str(method) + "/"
 
@@ -421,7 +392,6 @@ def subtreeExtractor(drug_id, edge_index, rel_index, shortest_paths, num_rel, fi
         row, col = sub_edge_index
         all_degree.append(torch.max(degree(col)).item())
 
-        ##因为这里面会涉及到multi-relation，所以在添加子图的时候，要把多条边都添加进去
         new_s_edge_index = sub_edge_index.transpose(1,0).numpy().tolist()
         new_s_value = [1 for _ in range(len(new_s_edge_index))]
         new_s_rel = sub_rel_index.numpy().tolist()
@@ -436,12 +406,8 @@ def subtreeExtractor(drug_id, edge_index, rel_index, shortest_paths, num_rel, fi
         sp_value = edge_index_value[:, 2]
 
         for i in range(len(sp_edge_index)):
-            if sp_value[i] == 1:  ##也是保证多关系的边全部在数据里
+            if sp_value[i] == 1:  
                 continue
-            # else:
-            #     s_edge_index.append(sp_edge_index[i].tolist())
-            #     s_value.append(sp_value[i])
-            #     s_rel.append(sp_value[i] + num_rel)
 
         assert len(s_edge_index) == len(s_value)
         assert len(s_edge_index) == len(s_rel)

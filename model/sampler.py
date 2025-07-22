@@ -59,20 +59,16 @@ class Prior(torch.nn.Module):
 
 
         self.conv1d = nn.Conv1d(
-            in_channels=2,    # 输入通道数 (对应 2xN 中的 2)
-            out_channels=1,   # 输出通道数 (卷积核的数量)
-            kernel_size=3,    # 卷积核的大小
-            stride=1,         # 步长
-            padding=1         # 填充，让输出长度和输入一致
+            in_channels=2,    
+            out_channels=1,   
+            kernel_size=3,    
+            stride=1,         
+            padding=1         
         )
 
     
     def forward(self, e1, e2, batch=None):
 
-        # e = torch.stack((e1, e2), dim=1)  # batch_size * 2 * d_dim
-        # e = self.conv1d(e)  # batch_size * 1 * d_dim
-        # e = e.squeeze(1)
-        # e = F.relu(e)
 
         e2 = self.fc1(torch.cat((e1, e2), dim=-1))
 
@@ -116,7 +112,7 @@ class Sampler(torch.nn.Module):
         tmp = []
 
 
-        k = self.args.k_step
+        k = self.args.k_step - self.args.fixed_num
         num_sample = 1
 
         origin_graphs = origin_graph.to_data_list()
@@ -131,9 +127,11 @@ class Sampler(torch.nn.Module):
                 relabel_nodes=False  
             )
             for _ in range(k):
-                batch.append(idx)
                 """action space"""
                 neighbors = self.get_neighbors(current_nodes, adj_matrix, subset, origin_graphs[idx])
+                if len(neighbors) == 0:
+                    break
+                batch.append(idx)
 
                 """prior network"""
                 neighbors_embeddings =  graph_embeddings[neighbors] # n neighbors
@@ -169,60 +167,6 @@ class Sampler(torch.nn.Module):
 
         return subgraph_list, prob_list, batch, tmp
 
-        #########################################################################################################
-        """sample candidate subgraph baed on knowledge graph"""
-
-        subset_list = []
-        for idx, node_pair in enumerate(data_idx):
-            subset, _, _, _ = k_hop_subgraph(
-                node_idx=node_pair,  
-                num_hops=1,         
-                edge_index=adj_matrix,  
-                relabel_nodes=False  
-            )
-            subset_list.append(subset)
-
-        current_nodes = data_idx
-
-        done = torch.zeros(batch_size, dtype=torch.bool).cuda()
-        from time import time
-        for _ in range(k):
-
-            """action space"""
-            neighbors, in_batch = self.get_neighbors_batch(current_nodes, adj_matrix, subset_list)
-            
-            """prior network"""
-            neighbors_embeddings =  graph_embeddings[neighbors] # n neighbors
-
-            k_embeddings = graph_embeddings[current_nodes].mean(dim=1) 
-            # all_embeddings = torch.cat((k_embeddings[in_batch], neighbors_embeddings), dim=-1)
-            logits = self.prior(k_embeddings[in_batch], neighbors_embeddings, in_batch)
-
-            """sampled neighbors"""
-            sampled_indices = self.sample(logits, in_batch)
-
-            sampled_neighbors = neighbors[sampled_indices] # batch_size * 1
-            sampled_logits = logits[sampled_indices] 
-            current_nodes = torch.concat((current_nodes, sampled_neighbors.unsqueeze(-1)), dim=-1) # batch_size * n
-
-            current_nodes = current_nodes[done == False]
-            sampled_logits = sampled_logits[done == False]
-            idx = torch.arange(batch_size).cuda()[done == False]
-
-            done = sampled_neighbors == self.num_nodes
-
-            for i in range(current_nodes.shape[0]):
-                subgraph_list.append(self.generate_subgraph(current_nodes[i], adj_matrix, edge_rel))
-                batch.append(idx[i])
-            prob_list = torch.cat([prob_list, sampled_logits], dim=0) 
-
-
-        subgraph_list = Batch.from_data_list(subgraph_list)
-        batch = torch.tensor(batch)
-        
-        return subgraph_list, prob_list, batch, tmp
-
-
 
 
     
@@ -233,7 +177,7 @@ class Sampler(torch.nn.Module):
             graph_embeddings = x
             graph_embeddings = torch.concat((graph_embeddings, self.done_embedding.weight), dim=0) 
 
-            k = self.args.k_step
+            k = self.args.k_step - self.args.fixed_num
             num_sample = 1
 
             subgraph_list = []
@@ -252,6 +196,8 @@ class Sampler(torch.nn.Module):
                 for i in range(k):
 
                     neighbors = self.get_neighbors(current_nodes, adj_matrix, subset, origin_graphs[idx]) 
+                    if len(neighbors) == 0:
+                        break
 
                     neighbors_embeddings =  graph_embeddings[neighbors] # n neighbors
                     k_embeddings = graph_embeddings[current_nodes].mean(dim=0)  # m nodes of subgraph -> mean -> 1
